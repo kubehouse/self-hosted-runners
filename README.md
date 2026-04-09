@@ -164,7 +164,7 @@ jobs:
   hello:
     runs-on: linux-k8s
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: echo "Running on $RUNNER_NAME ($RUNNER_OS)"
 ```
 

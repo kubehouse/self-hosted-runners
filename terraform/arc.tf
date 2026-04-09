@@ -160,12 +160,17 @@ resource "helm_release" "arc_runner_linux" {
   depends_on = [
     helm_release.arc_controller,
     kubernetes_secret_v1.github_pat,
+    kubectl_manifest.karpenter_nodepool_linux,
   ]
 }
 
 # ── Windows Runner Scale Set ───────────────────────────────────────────────────
 # Use in workflows: runs-on: windows-k8s
+# Skipped entirely when windows_runner_max_count = 0 (the default for POC) to
+# avoid ARC failing validation on a scale set that can never launch runners.
 resource "helm_release" "arc_runner_windows" {
+  count = var.windows_runner_max_count > 0 ? 1 : 0
+
   namespace        = kubernetes_namespace_v1.arc_runners.metadata[0].name
   create_namespace = false
   name             = "arc-runner-windows"
@@ -222,5 +227,6 @@ resource "helm_release" "arc_runner_windows" {
   depends_on = [
     helm_release.arc_controller,
     kubernetes_secret_v1.github_pat,
+    kubectl_manifest.karpenter_nodepool_windows,
   ]
 }

@@ -4,7 +4,7 @@
 ##
 ## Quick start:
 ##   export GITHUB_PAT=ghp_...
-##   make bootstrap        # create S3 state bucket + DynamoDB table (once)
+##   make bootstrap        # create S3 state bucket (once)
 ##   make init             # terraform init
 ##   make plan             # review changes
 ##   make apply            # provision everything
@@ -48,7 +48,7 @@ help: ## Show this help
 	@echo ""
 
 ## ─── One-time bootstrap ───────────────────────────────────────────────────────
-bootstrap: ## Create S3 state bucket + DynamoDB lock table (run once, ever)
+bootstrap: ## Create S3 state bucket (run once, ever)
 	@echo -e "\n$(BOLD)Bootstrapping Terraform state backend in $(REGION)...$(RESET)"
 	@aws s3api create-bucket \
 		--bucket $(STATE_BUCKET) \

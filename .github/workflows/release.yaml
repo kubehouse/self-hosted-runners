@@ -38,7 +38,6 @@ env:
   AWS_REGION: eu-west-2
   AWS_ACCOUNT: "573723531607"
   STATE_BUCKET: aws-terraform-state-files-573723531607-eu-west-2-an
-  STATE_TABLE: github-runners-tf-state-lock
   STATE_KEY: self-hosted-runners/terraform/terraform.tfstate
 
 jobs:
@@ -71,8 +70,8 @@ jobs:
             -backend-config="bucket=${{ env.STATE_BUCKET }}" \
             -backend-config="key=${{ env.STATE_KEY }}" \
             -backend-config="region=${{ env.AWS_REGION }}" \
-            -backend-config="dynamodb_table=${{ env.STATE_TABLE }}" \
             -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true" \
             -input=false
 
       - name: Terraform Plan
@@ -147,8 +146,8 @@ jobs:
             -backend-config="bucket=${{ env.STATE_BUCKET }}" \
             -backend-config="key=${{ env.STATE_KEY }}" \
             -backend-config="region=${{ env.AWS_REGION }}" \
-            -backend-config="dynamodb_table=${{ env.STATE_TABLE }}" \
             -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true" \
             -input=false
 
       - name: Download plan artifact

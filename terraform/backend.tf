@@ -12,11 +12,11 @@
 
 terraform {
   backend "s3" {
-    # Configured via -backend-config flags during terraform init
-    # (see Makefile or CI/CD pipeline)
-
-    # Configured via -backend-config flags during terraform init
-    # (see Makefile or CI/CD pipeline)
-    use_lockfile = true
+    # All values injected via -backend-config flags at `terraform init` time.
+    # See Makefile → init target, or release.yaml workflow.
+    #
+    # use_lockfile requires S3 Object Lock enabled at bucket creation, which the
+    # bootstrap Makefile does not set. Removed to avoid silent lock failures;
+    # DynamoDB locking is passed via -backend-config="dynamodb_table=..." instead.
   }
 }

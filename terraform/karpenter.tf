@@ -1,7 +1,6 @@
 # ── Karpenter IAM + interruption queue ────────────────────────────────────────
 module "karpenter" {
-  source  = "terraform-aws-modules/eks/aws//modules/karpenter"
-  version = "~> 21.17.1"
+  source = "git::https://github.com/terraform-aws-modules/terraform-aws-eks.git//modules/karpenter?ref=6bac707d5496f4b494ce8bf63bfc8d245aead592"
 
   cluster_name = module.eks.cluster_name
 
@@ -24,9 +23,10 @@ resource "helm_release" "karpenter" {
   repository       = "oci://public.ecr.aws/karpenter"
   chart            = "karpenter"
   version          = var.karpenter_version
-  wait             = true
-  wait_for_jobs    = true
-  timeout          = 300
+  wait    = true
+  # wait_for_jobs blocks Helm until Karpenter's cert-init Job completes (~2-5 min
+  # extra). Removing it — the controller Deployment readiness is the right gate.
+  timeout = 180
 
   values = [
     yamlencode({
@@ -40,8 +40,11 @@ resource "helm_release" "karpenter" {
       }
       controller = {
         resources = {
-          requests = { cpu = "1", memory = "1Gi" }
-          limits   = { cpu = "1", memory = "1Gi" }
+          # t3.medium = 2 vCPU / 4 GiB. Requesting 1 vCPU left ARC controller
+          # unable to schedule and caused Helm wait timeouts. 100m is plenty
+          # for an idle POC; the controller is mostly event-driven, not CPU-bound.
+          requests = { cpu = "100m", memory = "256Mi" }
+          limits   = { cpu = "500m", memory = "512Mi" }
         }
       }
       # Run on the dedicated system node group

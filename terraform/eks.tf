@@ -1,6 +1,5 @@
 module "eks" {
-  source  = "terraform-aws-modules/eks/aws"
-  version = "~> 21.17.1"
+  source = "git::https://github.com/terraform-aws-modules/terraform-aws-eks.git?ref=6bac707d5496f4b494ce8bf63bfc8d245aead592"
 
   name               = local.name
   kubernetes_version = var.cluster_version
@@ -21,19 +20,28 @@ module "eks" {
   addons = {
     coredns = {
       most_recent = true
+      # OVERWRITE avoids a stall when resources already exist from a previous
+      # partial apply. NONE (the default) causes the addon to sit in DEGRADED.
+      resolve_conflicts_on_create = "OVERWRITE"
+      resolve_conflicts_on_update = "OVERWRITE"
     }
     # Required for EKS Pod Identity (used by Karpenter)
     eks-pod-identity-agent = {
-      most_recent = true
+      most_recent                 = true
+      resolve_conflicts_on_create = "OVERWRITE"
+      resolve_conflicts_on_update = "OVERWRITE"
     }
     kube-proxy = {
-      most_recent = true
+      most_recent                 = true
+      resolve_conflicts_on_create = "OVERWRITE"
+      resolve_conflicts_on_update = "OVERWRITE"
     }
     vpc-cni = {
-      most_recent = true
+      most_recent                 = true
+      resolve_conflicts_on_create = "OVERWRITE"
+      resolve_conflicts_on_update = "OVERWRITE"
       # ENABLE_WINDOWS_IPAM forces the CNI to reconfigure its IPAM mode on first
-      # install, which adds ~5 min to the initial addon health check. Enable it
-      # only when Windows runner pods are actually being deployed.
+      # install (~5 min delay). Enable only when Windows runner pods are needed.
       # configuration_values = jsonencode({ env = { ENABLE_WINDOWS_IPAM = "true" } })
     }
   }

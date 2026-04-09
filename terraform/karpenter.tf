@@ -23,7 +23,7 @@ resource "helm_release" "karpenter" {
   repository       = "oci://public.ecr.aws/karpenter"
   chart            = "karpenter"
   version          = var.karpenter_version
-  wait    = true
+  wait             = true
   # wait_for_jobs blocks Helm until Karpenter's cert-init Job completes (~2-5 min
   # extra). Removing it — the controller Deployment readiness is the right gate.
   timeout = 180

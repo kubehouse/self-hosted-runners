@@ -81,7 +81,7 @@ plan: ## terraform plan → saves tfplan (requires GITHUB_PAT env var)
 	@test -n "$(GITHUB_PAT)" \
 		|| (echo -e "$(RED)ERROR: export GITHUB_PAT=ghp_...$(RESET)" && exit 1)
 	cd $(TF_DIR) && terraform plan \
-		-lock=false \
+		-lock-timeout=5m \
 		-var="github_pat=$(GITHUB_PAT)" \
 		-out=tfplan \
  		-detailed-exitcode || true
@@ -95,7 +95,7 @@ plan-output: ## Convert tfplan to human-readable text output
 apply: ## terraform apply from saved plan file
 	@test -f $(TF_DIR)/tfplan \
 		|| (echo -e "$(RED)ERROR: no tfplan found — run 'make plan' first$(RESET)" && exit 1)
-	cd $(TF_DIR) && terraform apply -lock=false tfplan
+	cd $(TF_DIR) && terraform apply -lock-timeout=5m tfplan
 
 apply-auto: ## terraform apply without plan file (auto-approve — use carefully)
 	@test -n "$(GITHUB_PAT)" \
@@ -103,7 +103,7 @@ apply-auto: ## terraform apply without plan file (auto-approve — use carefully
 	@echo -e "$(RED)WARNING: applying without a saved plan. Ctrl-C to abort.$(RESET)"
 	@sleep 3
 	cd $(TF_DIR) && terraform apply \
-		-lock=false \
+		-lock-timeout=5m \
 		-var="github_pat=$(GITHUB_PAT)" \
 		-auto-approve
 

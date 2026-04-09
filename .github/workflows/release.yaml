@@ -6,9 +6,13 @@ name: Release — Provision Infrastructure
 #   2. Manual workflow_dispatch — useful for applying an already-approved plan
 #      or forcing a re-plan without a code change.
 #
-# Required secrets (set in repo Settings → Secrets and variables → Actions):
-#   AWS_CICD_ROLE_ARN    — from `terraform output github_actions_cicd_role_arn`
-#   RUNNER_GITHUB_PAT    — GitHub PAT with admin:org (or repo) scope for ARC
+# Required repository variables / secrets (set in repo Settings → Secrets and
+# variables → Actions):
+#   Variables:
+#     TF_DIR, TF_VERSION, AWS_REGION, AWS_ACCOUNT, STATE_BUCKET, STATE_KEY,
+#     AWS_CICD_ROLE_ARN
+#   Secret:
+#     RUNNER_GITHUB_PAT    — GitHub PAT with admin:org (or repo) scope for ARC
 
 on:
   push:
@@ -33,12 +37,12 @@ permissions:
   pull-requests: write
 
 env:
-  TF_DIR: terraform
-  TF_VERSION: "~1.14"
-  AWS_REGION: eu-west-2
-  AWS_ACCOUNT: "573723531607"
-  STATE_BUCKET: aws-terraform-state-files-573723531607-eu-west-2-an
-  STATE_KEY: self-hosted-runners/terraform/terraform.tfstate
+  TF_DIR: ${{ vars.TF_DIR }}
+  TF_VERSION: ${{ vars.TF_VERSION }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ACCOUNT: ${{ vars.AWS_ACCOUNT }}
+  STATE_BUCKET: ${{ vars.STATE_BUCKET }}
+  STATE_KEY: ${{ vars.STATE_KEY }}
 
 jobs:
   # ── Plan ──────────────────────────────────────────────────────────────────────
@@ -57,7 +61,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::573723531607:role/github_oidc_role
+          role-to-assume: ${{ vars.AWS_CICD_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - uses: hashicorp/setup-terraform@v4
@@ -79,6 +83,7 @@ jobs:
         run: |
           set +e
           terraform -chdir=${{ env.TF_DIR }} plan \
+            -lock-timeout=5m \
             -var="github_pat=${{ secrets.RUNNER_GITHUB_PAT }}" \
             -detailed-exitcode \
             -no-color \
@@ -133,7 +138,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::573723531607:role/github_oidc_role
+          role-to-assume: ${{ vars.AWS_CICD_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - uses: hashicorp/setup-terraform@v4
@@ -160,6 +165,7 @@ jobs:
         id: apply
         run: |
           terraform -chdir=${{ env.TF_DIR }} apply \
+            -lock-timeout=5m \
             -auto-approve \
             -no-color \
             tfplan \

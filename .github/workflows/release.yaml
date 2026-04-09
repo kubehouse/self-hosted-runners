@@ -9,8 +9,7 @@ name: Release — Provision Infrastructure
 # Required repository variables / secrets (set in repo Settings → Secrets and
 # variables → Actions):
 #   Variables:
-#     TF_DIR, TF_VERSION, AWS_REGION, AWS_ACCOUNT, STATE_BUCKET, STATE_KEY,
-#     AWS_CICD_ROLE_ARN
+#     TF_DIR, TF_VERSION, AWS_REGION, STATE_BUCKET, STATE_KEY, AWS_CICD_ROLE_ARN
 #   Secret:
 #     RUNNER_GITHUB_PAT    — GitHub PAT with admin:org (or repo) scope for ARC
 
@@ -36,14 +35,6 @@ permissions:
   contents: read
   pull-requests: write
 
-env:
-  TF_DIR: ${{ vars.TF_DIR }}
-  TF_VERSION: ${{ vars.TF_VERSION }}
-  AWS_REGION: ${{ vars.AWS_REGION }}
-  AWS_ACCOUNT: ${{ vars.AWS_ACCOUNT }}
-  STATE_BUCKET: ${{ vars.STATE_BUCKET }}
-  STATE_KEY: ${{ vars.STATE_KEY }}
-
 jobs:
   # ── Plan ──────────────────────────────────────────────────────────────────────
   plan:
@@ -62,18 +53,18 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_CICD_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: ${{ vars.AWS_REGION }}
 
       - uses: hashicorp/setup-terraform@v4
         with:
-          terraform_version: ${{ env.TF_VERSION }}
+          terraform_version: ${{ vars.TF_VERSION }}
 
       - name: Terraform Init
         run: |
-          terraform -chdir=${{ env.TF_DIR }} init \
-            -backend-config="bucket=${{ env.STATE_BUCKET }}" \
-            -backend-config="key=${{ env.STATE_KEY }}" \
-            -backend-config="region=${{ env.AWS_REGION }}" \
+          terraform -chdir=${{ vars.TF_DIR }} init \
+            -backend-config="bucket=${{ vars.STATE_BUCKET }}" \
+            -backend-config="key=${{ vars.STATE_KEY }}" \
+            -backend-config="region=${{ vars.AWS_REGION }}" \
             -backend-config="encrypt=true" \
             -backend-config="use_lockfile=true" \
             -input=false
@@ -82,7 +73,7 @@ jobs:
         id: plan
         run: |
           set +e
-          terraform -chdir=${{ env.TF_DIR }} plan \
+          terraform -chdir=${{ vars.TF_DIR }} plan \
             -lock-timeout=5m \
             -var="github_pat=${{ secrets.RUNNER_GITHUB_PAT }}" \
             -detailed-exitcode \
@@ -112,7 +103,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: tfplan-${{ github.sha }}
-          path: ${{ env.TF_DIR }}/tfplan
+          path: ${{ vars.TF_DIR }}/tfplan
           # Plans are only valid for the exact commit that produced them
           retention-days: 1
 
@@ -139,18 +130,18 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_CICD_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: ${{ vars.AWS_REGION }}
 
       - uses: hashicorp/setup-terraform@v4
         with:
-          terraform_version: ${{ env.TF_VERSION }}
+          terraform_version: ${{ vars.TF_VERSION }}
 
       - name: Terraform Init
         run: |
-          terraform -chdir=${{ env.TF_DIR }} init \
-            -backend-config="bucket=${{ env.STATE_BUCKET }}" \
-            -backend-config="key=${{ env.STATE_KEY }}" \
-            -backend-config="region=${{ env.AWS_REGION }}" \
+          terraform -chdir=${{ vars.TF_DIR }} init \
+            -backend-config="bucket=${{ vars.STATE_BUCKET }}" \
+            -backend-config="key=${{ vars.STATE_KEY }}" \
+            -backend-config="region=${{ vars.AWS_REGION }}" \
             -backend-config="encrypt=true" \
             -backend-config="use_lockfile=true" \
             -input=false
@@ -159,12 +150,12 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: tfplan-${{ github.sha }}
-          path: ${{ env.TF_DIR }}
+          path: ${{ vars.TF_DIR }}
 
       - name: Terraform Apply
         id: apply
         run: |
-          terraform -chdir=${{ env.TF_DIR }} apply \
+          terraform -chdir=${{ vars.TF_DIR }} apply \
             -lock-timeout=5m \
             -auto-approve \
             -no-color \
@@ -186,5 +177,5 @@ jobs:
         run: |
           echo ""
           echo "=== Cluster ready. Configure kubectl: ==="
-          terraform -chdir=${{ env.TF_DIR }} output -raw configure_kubectl
+          terraform -chdir=${{ vars.TF_DIR }} output -raw configure_kubectl
           echo ""

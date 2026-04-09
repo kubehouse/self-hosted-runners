@@ -29,10 +29,6 @@ permissions:
   pull-requests: write  # post lint/plan summaries as PR comments
   security-events: write  # upload SARIF findings to GitHub Security tab
 
-env:
-  TF_DIR: ${{ vars.TF_DIR }}
-  TF_VERSION: ${{ vars.TF_VERSION }}
-
 jobs:
   # ── 1. Format ────────────────────────────────────────────────────────────────
   fmt:
@@ -43,11 +39,11 @@ jobs:
 
       - uses: hashicorp/setup-terraform@v4
         with:
-          terraform_version: ${{ env.TF_VERSION }}
+          terraform_version: ${{ vars.TF_VERSION }}
 
       - name: terraform fmt
         id: fmt
-        run: terraform -chdir=${{ env.TF_DIR }} fmt -recursive -check -diff
+        run: terraform -chdir=${{ vars.TF_DIR }} fmt -recursive -check -diff
         continue-on-error: true
 
       - name: Post fmt failure to PR
@@ -75,17 +71,17 @@ jobs:
 
       - uses: hashicorp/setup-terraform@v4
         with:
-          terraform_version: ${{ env.TF_VERSION }}
+          terraform_version: ${{ vars.TF_VERSION }}
 
       - name: terraform init (no backend)
         run: |
-          terraform -chdir=${{ env.TF_DIR }} init \
+          terraform -chdir=${{ vars.TF_DIR }} init \
             -backend=false \
             -reconfigure \
             -input=false
 
       - name: terraform validate
-        run: terraform -chdir=${{ env.TF_DIR }} validate -no-color
+        run: terraform -chdir=${{ vars.TF_DIR }} validate -no-color
 
   # ── 3. Lint ───────────────────────────────────────────────────────────────────
   lint:
@@ -100,13 +96,13 @@ jobs:
 
       - name: Init TFLint (downloads AWS plugin)
         run: tflint --init
-        working-directory: ${{ env.TF_DIR }}
+        working-directory: ${{ vars.TF_DIR }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
       - name: Run TFLint
         run: tflint --recursive --format compact
-        working-directory: ${{ env.TF_DIR }}
+        working-directory: ${{ vars.TF_DIR }}
 
   # ── 4. Security scan ──────────────────────────────────────────────────────────
   security:
@@ -119,7 +115,7 @@ jobs:
         id: checkov
         uses: bridgecrewio/checkov-action@v12
         with:
-          directory: ${{ env.TF_DIR }}
+          directory: ${{ vars.TF_DIR }}
           framework: terraform
           soft_fail: false
           # Emit both human-readable console output and a SARIF file for the

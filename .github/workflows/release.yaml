@@ -1,0 +1,184 @@
+name: Release — Provision Infrastructure
+
+# Triggers:
+#   1. Push to main — runs plan automatically; apply requires approval via the
+#      `production` environment (Settings → Environments → production → Required reviewers).
+#   2. Manual workflow_dispatch — useful for applying an already-approved plan
+#      or forcing a re-plan without a code change.
+#
+# Required secrets (set in repo Settings → Secrets and variables → Actions):
+#   AWS_CICD_ROLE_ARN    — from `terraform output github_actions_cicd_role_arn`
+#   RUNNER_GITHUB_PAT    — GitHub PAT with admin:org (or repo) scope for ARC
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "terraform action"
+        required: true
+        type: choice
+        options: [plan-only, apply]
+        default: plan-only
+
+# Only one release at a time. Subsequent pushes queue rather than cancel.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  id-token: write   # required for OIDC → AWS AssumeRoleWithWebIdentity
+  contents: read
+  pull-requests: write
+
+env:
+  TF_DIR: terraform
+  TF_VERSION: "~1.14"
+  AWS_REGION: eu-west-2
+  STATE_BUCKET: github-runners-tf-state
+  STATE_TABLE: github-runners-tf-state-lock
+  STATE_KEY: terraform.tfstate
+
+jobs:
+  # ── Plan ──────────────────────────────────────────────────────────────────────
+  plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    outputs:
+      exitcode: ${{ steps.plan.outputs.exitcode }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Authenticate with AWS via OIDC — no static credentials in GitHub.
+      # Bootstrap: run `make init && make plan && make apply` locally first to
+      # create the OIDC provider and this role, then set AWS_CICD_ROLE_ARN.
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CICD_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        run: |
+          terraform -chdir=${{ env.TF_DIR }} init \
+            -backend-config="bucket=${{ env.STATE_BUCKET }}" \
+            -backend-config="key=${{ env.STATE_KEY }}" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ env.STATE_TABLE }}" \
+            -backend-config="encrypt=true" \
+            -input=false
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          set +e
+          terraform -chdir=${{ env.TF_DIR }} plan \
+            -var="github_pat=${{ secrets.RUNNER_GITHUB_PAT }}" \
+            -detailed-exitcode \
+            -no-color \
+            -out=tfplan \
+            2>&1 | tee /tmp/plan.txt
+          echo "exitcode=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+          set -e
+
+      - name: Fail if plan errored (exit code 1)
+        if: steps.plan.outputs.exitcode == '1'
+        run: |
+          echo "terraform plan returned exit code 1 (error) — see logs above"
+          exit 1
+
+      - name: Add plan to job summary
+        run: |
+          ICON="${{ steps.plan.outputs.exitcode == '0' && '✅ No changes' || '🟡 Changes pending' }}"
+          echo "## ${ICON}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```hcl' >> "$GITHUB_STEP_SUMMARY"
+          # Last 200 lines contain the summary; full log is in the step output
+          tail -200 /tmp/plan.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload plan artifact
+        if: steps.plan.outputs.exitcode == '2'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ github.sha }}
+          path: ${{ env.TF_DIR }}/tfplan
+          # Plans are only valid for the exact commit that produced them
+          retention-days: 1
+
+  # ── Apply ─────────────────────────────────────────────────────────────────────
+  apply:
+    name: Terraform Apply
+    runs-on: ubuntu-latest
+    needs: plan
+    # Guard: changes present AND (push to main OR manual apply)
+    if: |
+      needs.plan.outputs.exitcode == '2' && (
+        github.event_name == 'push' ||
+        (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
+      )
+    # `production` environment gates this job behind manual approval.
+    # Create it in: Settings → Environments → New environment → production
+    # Then add Required reviewers so an engineer must approve each apply.
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CICD_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        run: |
+          terraform -chdir=${{ env.TF_DIR }} init \
+            -backend-config="bucket=${{ env.STATE_BUCKET }}" \
+            -backend-config="key=${{ env.STATE_KEY }}" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ env.STATE_TABLE }}" \
+            -backend-config="encrypt=true" \
+            -input=false
+
+      - name: Download plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ github.sha }}
+          path: ${{ env.TF_DIR }}
+
+      - name: Terraform Apply
+        id: apply
+        run: |
+          terraform -chdir=${{ env.TF_DIR }} apply \
+            -auto-approve \
+            -no-color \
+            tfplan \
+            2>&1 | tee /tmp/apply.txt
+
+      - name: Add apply summary
+        if: always()
+        run: |
+          STATUS="${{ steps.apply.outcome }}"
+          ICON="${{ steps.apply.outcome == 'success' && '✅' || '❌' }}"
+          echo "## ${ICON} Apply ${STATUS}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          tail -80 /tmp/apply.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Print kubectl command
+        if: steps.apply.outcome == 'success'
+        run: |
+          echo ""
+          echo "=== Cluster ready. Configure kubectl: ==="
+          terraform -chdir=${{ env.TF_DIR }} output -raw configure_kubectl
+          echo ""

@@ -1,0 +1,57 @@
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: windows-runners
+spec:
+  template:
+    metadata:
+      labels:
+        role: runner
+        runner-type: windows
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: windows
+
+      requirements:
+        - key: kubernetes.io/os
+          operator: In
+          values: ["windows"]
+
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+
+        # Windows Spot instances are available but less common; On-Demand is
+        # safer for Windows workloads that may have longer start-up times.
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand", "spot"]
+
+        # Windows Server 2022 reserves ~3 GiB of RAM for the OS, so t3.large
+        # (8 GiB) is the practical minimum. t3.xlarge gives more headroom for
+        # build artefacts without jumping to expensive m-series instances.
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values:
+            - t3.large
+            - t3.xlarge
+            - t3a.large
+            - t3a.xlarge
+
+      # Standard taint for Windows nodes in mixed-OS clusters.
+      # The ARC runner pods tolerate this (configured in arc.tf).
+      taints:
+        - key: os
+          value: windows
+          effect: NoSchedule
+
+  limits:
+    cpu: "50"
+    memory: 200Gi
+
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    # Windows nodes take longer to drain; give them extra time
+    consolidateAfter: 60s

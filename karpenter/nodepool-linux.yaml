@@ -1,0 +1,61 @@
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: linux-runners
+spec:
+  template:
+    metadata:
+      labels:
+        role: runner
+        runner-type: linux
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: linux
+
+      requirements:
+        - key: kubernetes.io/os
+          operator: In
+          values: ["linux"]
+
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+
+        # Prefer Spot; fall back to On-Demand if Spot capacity is unavailable.
+        # ARC jobs are ephemeral so interruptions are generally safe.
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot", "on-demand"]
+
+        # POC-sized instances. t3.medium covers lightweight jobs; t3.large and
+        # t3.xlarge handle heavier builds. Broad selection maximises Spot availability.
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values:
+            - t3.medium
+            - t3.large
+            - t3.xlarge
+            - t3a.medium
+            - t3a.large
+            - t3a.xlarge
+            - t2.medium
+            - t2.large
+            - t2.xlarge
+
+      # Taint keeps non-runner workloads off these nodes.
+      # The ARC runner pods tolerate this taint (configured in arc.tf).
+      taints:
+        - key: github-runner
+          value: linux
+          effect: NoSchedule
+
+  # Hard cap to prevent runaway cost
+  limits:
+    cpu: "100"
+    memory: 400Gi
+
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 30s

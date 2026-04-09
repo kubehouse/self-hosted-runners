@@ -53,9 +53,9 @@ variable "linux_runner_min_count" {
 }
 
 variable "linux_runner_max_count" {
-  description = "Maximum concurrent Linux runner replicas"
+  description = "Maximum concurrent Linux runner replicas (lower for cost POC)"
   type        = number
-  default     = 20
+  default     = 5
 }
 
 variable "linux_runner_image" {
@@ -73,9 +73,9 @@ variable "windows_runner_min_count" {
 }
 
 variable "windows_runner_max_count" {
-  description = "Maximum concurrent Windows runner replicas"
+  description = "Maximum concurrent Windows runner replicas (set to 0 to disable — Windows nodes are expensive)"
   type        = number
-  default     = 10
+  default     = 0
 }
 
 variable "windows_runner_image" {
@@ -99,6 +99,16 @@ variable "github_org" {
   EOT
   type        = string
   default     = "kubehouse"
+}
+
+variable "use_existing_oidc_role_arn" {
+  description = <<-EOT
+    If provided, uses an existing OIDC role instead of creating a new one.
+    This is useful when you already have the role configured in a different
+    stack or AWS account.
+  EOT
+  type        = string
+  default     = null
 }
 
 # ─── Helm chart versions ──────────────────────────────────────────────────────

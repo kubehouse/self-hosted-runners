@@ -15,7 +15,8 @@ SHELL := /bin/bash
 TF_DIR       := terraform
 REGION       ?= eu-west-2
 CLUSTER_NAME ?= github-runners
-STATE_BUCKET ?= github-runners-tf-state
+AWS_ACCOUNT  ?= 573723531607
+STATE_BUCKET ?= aws-terraform-state-files-$(AWS_ACCOUNT)-$(REGION)-anself-hosted-runners
 STATE_TABLE  ?= github-runners-tf-state-lock
 STATE_KEY    ?= terraform.tfstate
 

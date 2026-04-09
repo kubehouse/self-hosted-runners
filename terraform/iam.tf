@@ -54,6 +54,9 @@ data "aws_iam_policy_document" "github_actions_assume_role" {
 }
 
 resource "aws_iam_role" "github_actions_cicd" {
+  # Skip if using existing role
+  count = var.use_existing_oidc_role_arn == null ? 1 : 0
+
   name               = "${local.name}-github-actions-cicd"
   description        = "Assumed by GitHub Actions via OIDC to provision EKS runner infrastructure"
   assume_role_policy = data.aws_iam_policy_document.github_actions_assume_role.json
@@ -71,6 +74,9 @@ resource "aws_iam_role" "github_actions_cicd" {
 # Replace with a tightly-scoped policy (EC2, EKS, IAM, VPC, SQS, ECR, SecretsManager)
 # before production use.
 resource "aws_iam_role_policy_attachment" "github_actions_admin" {
-  role       = aws_iam_role.github_actions_cicd.name
+  # Skip if using existing role
+  count = var.use_existing_oidc_role_arn == null ? 1 : 0
+
+  role       = aws_iam_role.github_actions_cicd[0].name
   policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
 }

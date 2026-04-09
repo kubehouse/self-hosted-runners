@@ -26,7 +26,7 @@ output "karpenter_node_role_arn" {
 
 output "github_actions_cicd_role_arn" {
   description = "IAM role ARN for GitHub Actions OIDC — set as AWS_CICD_ROLE_ARN secret in GitHub"
-  value       = aws_iam_role.github_actions_cicd.arn
+  value       = var.use_existing_oidc_role_arn != null ? var.use_existing_oidc_role_arn : aws_iam_role.github_actions_cicd[0].arn
 }
 
 output "linux_runner_scale_set_name" {

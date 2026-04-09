@@ -11,5 +11,9 @@
 # CI/CD (release.yaml) injects these via BACKEND_* environment variables.
 
 terraform {
-  backend "local" {}
+  backend "s3" {
+    # Configured via -backend-config flags during terraform init
+    # (see Makefile or CI/CD pipeline)
+    use_lockfile = true
+  }
 }

@@ -37,9 +37,9 @@ env:
   TF_VERSION: "~1.14"
   AWS_REGION: eu-west-2
   AWS_ACCOUNT: "573723531607"
-  STATE_BUCKET: aws-terraform-state-files-573723531607-eu-west-2-anself-hosted-runners
-  STATE_TABLE: github-runners-tf-state-lock
-  STATE_KEY: terraform.tfstate
+    STATE_BUCKET: aws-terraform-state-files-573723531607-eu-west-2-an
+    STATE_TABLE: github-runners-tf-state-lock
+    STATE_KEY: self-hosted-runners/terraform/terraform.tfstate
 
 jobs:
   # ── Plan ──────────────────────────────────────────────────────────────────────
@@ -58,7 +58,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_CICD_ROLE_ARN }}
+          role-to-assume: arn:aws:iam::573723531607:role/github_oidc_role
           aws-region: ${{ env.AWS_REGION }}
 
       - uses: hashicorp/setup-terraform@v3
@@ -134,7 +134,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_CICD_ROLE_ARN }}
+          role-to-assume: arn:aws:iam::573723531607:role/github_oidc_role
           aws-region: ${{ env.AWS_REGION }}
 
       - uses: hashicorp/setup-terraform@v3

@@ -25,6 +25,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read  # allow upload-sarif to inspect the workflow run for telemetry
   pull-requests: write  # post lint/plan summaries as PR comments
   security-events: write  # upload SARIF findings to GitHub Security tab
 

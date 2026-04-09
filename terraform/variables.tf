@@ -124,3 +124,22 @@ variable "arc_version" {
   type        = string
   default     = "0.10.1"
 }
+
+# ── Backend settings (optional) ───────────────────────────────────────────────
+variable "tf_state_bucket" {
+  description = "S3 bucket name for Terraform state (optional; set via tfvars or CI)"
+  type        = string
+  default     = ""
+}
+
+variable "tf_state_key" {
+  description = "S3 object key for Terraform state (optional; set via tfvars or CI)"
+  type        = string
+  default     = ""
+}
+
+variable "tf_state_use_lockfile" {
+  description = "Whether to use S3 lockfile for state locking (avoid DynamoDB)"
+  type        = bool
+  default     = true
+}

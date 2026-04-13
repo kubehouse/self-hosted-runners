@@ -1,0 +1,53 @@
+# Pre-commit hooks — run automatically on every `git commit`.
+#
+# Install the pre-commit framework:
+#   pip install pre-commit
+#   pre-commit install          # registers hooks in .git/hooks/pre-commit
+#   pre-commit run --all-files  # run manually across the whole repo
+#
+# Pin revisions to SHAs or tags for reproducible hook behaviour.
+# Update with: pre-commit autoupdate
+
+repos:
+  # ── General hygiene ──────────────────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: check-merge-conflict
+      - id: check-case-conflict     # catches case-insensitive filename collisions
+      - id: detect-private-key      # belt-and-braces before Gitleaks runs
+
+  # ── Secret scanning ───────────────────────────────────────────────────────────
+  # Gitleaks scans the full diff for credentials, tokens, and high-entropy strings.
+  # If a false positive is found, add it to .gitleaks.toml under [[allowlist]].
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.27.2
+    hooks:
+      - id: gitleaks
+
+  # ── Terraform ─────────────────────────────────────────────────────────────────
+  # Uses antonbabenko's pre-commit-terraform collection which wraps the standard
+  # Terraform toolchain. Requires terraform, tflint, and checkov on PATH.
+  - repo: https://github.com/antonbabenko/pre-commit-terraform
+    rev: v1.99.4
+    hooks:
+      # Auto-format on commit so formatting drift never reaches CI.
+      - id: terraform_fmt
+
+      # Lint with the AWS ruleset; .tflint.hcl is the config source.
+      - id: terraform_tflint
+        args:
+          - --args=--config=__GIT_WORKING_DIR__/.tflint.hcl
+
+      # Checkov static analysis — mirrors what the CI security job runs.
+      # Skip the same low-signal checks that CI skips for consistency.
+      - id: terraform_checkov
+        args:
+          - --args=--quiet
+          - --args=--compact
+          - --args=--skip-check=CKV_AWS_144,CKV2_AWS_62

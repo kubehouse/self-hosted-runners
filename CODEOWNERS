@@ -1,0 +1,7 @@
+# Every file in this repository requires review from @francescowang.
+# Add team entries below to share ownership of specific paths.
+#
+# Syntax: <path-pattern> <owner> [<owner> ...]
+# Docs:   https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+* @francescowang

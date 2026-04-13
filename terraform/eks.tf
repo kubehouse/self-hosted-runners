@@ -17,6 +17,13 @@ module "eks" {
   # Give the caller IAM identity cluster-admin access
   enable_cluster_creator_admin_permissions = true
 
+  # vpc-cni is intentionally omitted here. The terraform-aws-eks module gates
+  # all addons on the managed node group completing first (so coredns doesn't
+  # fail on an empty cluster). vpc-cni must exist BEFORE the node is ready, so
+  # keeping it in this block creates a deadlock:
+  #   node group ACTIVE → node Ready → CNI installed → addon created → (waiting for node group)
+  # Instead, vpc-cni is created as a standalone resource in vpc_cni_addon.tf
+  # with an explicit depends_on on the EKS cluster only.
   addons = {
     coredns = {
       most_recent = true
@@ -35,14 +42,6 @@ module "eks" {
       most_recent                 = true
       resolve_conflicts_on_create = "OVERWRITE"
       resolve_conflicts_on_update = "OVERWRITE"
-    }
-    vpc-cni = {
-      most_recent                 = true
-      resolve_conflicts_on_create = "OVERWRITE"
-      resolve_conflicts_on_update = "OVERWRITE"
-      # ENABLE_WINDOWS_IPAM forces the CNI to reconfigure its IPAM mode on first
-      # install (~5 min delay). Enable only when Windows runner pods are needed.
-      # configuration_values = jsonencode({ env = { ENABLE_WINDOWS_IPAM = "true" } })
     }
   }
 

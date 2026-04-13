@@ -8,6 +8,7 @@
 ##   make init             # terraform init
 ##   make plan             # review changes
 ##   make apply            # provision everything
+##   make unlock LOCK_ID=... # clear a stale Terraform state lock
 
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
@@ -16,7 +17,7 @@ TF_DIR       := terraform
 REGION       ?= eu-west-2
 CLUSTER_NAME ?= github-runners
 AWS_ACCOUNT  ?= 573723531607
-STATE_BUCKET ?= aws-terraform-state-files-$(AWS_ACCOUNT)-$(REGION)-an
+STATE_BUCKET ?= kubehouse-terraform-state
 STATE_KEY    ?= self-hosted-runners/terraform/terraform.tfstate
 
 # ── Colours ────────────────────────────────────────────────────────────────────
@@ -34,8 +35,8 @@ BACKEND_ARGS := \
   -backend-config="encrypt=true" \
   -backend-config="use_lockfile=true"
 
-.PHONY: help bootstrap init plan plan-output apply apply-auto destroy \
-        fmt fmt-check validate lint security \
+.PHONY: help bootstrap init plan plan-output unlock apply apply-auto destroy \
+        fmt fmt-check validate lint security test \
         kubeconfig status runners logs \
         docker-linux docker-windows
 
@@ -92,6 +93,11 @@ plan-output: ## Convert tfplan to human-readable text output
 	cd $(TF_DIR) && terraform show -no-color tfplan > tfplan.txt
 	@echo "Plan output saved to $(TF_DIR)/tfplan.txt"
 
+unlock: ## Force-unlock Terraform state lock (usage: make unlock LOCK_ID=...)
+	@test -n "$(LOCK_ID)" \
+		|| (echo -e "$(RED)ERROR: set LOCK_ID=...$(RESET)" && exit 1)
+	cd $(TF_DIR) && terraform force-unlock -force $(LOCK_ID)
+
 apply: ## terraform apply from saved plan file
 	@test -f $(TF_DIR)/tfplan \
 		|| (echo -e "$(RED)ERROR: no tfplan found — run 'make plan' first$(RESET)" && exit 1)
@@ -132,13 +138,20 @@ security: ## Run Checkov security scan against the terraform directory
 		|| (echo "Install checkov: pip install checkov" && exit 1)
 	checkov -d $(TF_DIR) --framework terraform --compact --quiet
 
-ci: fmt-check validate lint security ## Run all CI checks locally (fmt-check + validate + lint + security)
+test: ## Run Terraform native tests (uses mock providers — no AWS creds needed)
+	@command -v terraform >/dev/null 2>&1 \
+		|| (echo "Install terraform >= 1.14.8: https://developer.hashicorp.com/terraform/downloads" && exit 1)
+	cd $(TF_DIR) && terraform test
+
+ci: fmt-check validate lint security test ## Run all CI checks locally (fmt-check + validate + lint + security + test)
 
 ## ─── Cluster operations ───────────────────────────────────────────────────────
 kubeconfig: ## Update ~/.kube/config for the EKS cluster
 	aws eks update-kubeconfig --region $(REGION) --name $(CLUSTER_NAME)
 
 status: ## Show ARC pods, runner scale sets, and Karpenter nodes
+	@echo -e "\n$(BOLD)Karpenter controller (kube-system):$(RESET)"
+	@kubectl get pods -n kube-system -l app.kubernetes.io/name=karpenter --no-headers 2>/dev/null || echo "  (not reachable)"
 	@echo -e "\n$(BOLD)ARC controller (arc-systems):$(RESET)"
 	@kubectl get pods -n arc-systems --no-headers 2>/dev/null || echo "  (not reachable)"
 	@echo -e "\n$(BOLD)Runner pods (arc-runners):$(RESET)"
@@ -156,7 +169,7 @@ logs-arc: ## Tail ARC controller logs
 	kubectl logs -n arc-systems -l app.kubernetes.io/name=gha-runner-scale-set-controller -f
 
 logs-karpenter: ## Tail Karpenter controller logs
-	kubectl logs -n karpenter -l app.kubernetes.io/name=karpenter -f --max-log-requests 5
+	kubectl logs -n kube-system -l app.kubernetes.io/name=karpenter -f --max-log-requests 5
 
 ## ─── Docker images ────────────────────────────────────────────────────────────
 docker-linux: ## Build the Linux DinD runner image locally

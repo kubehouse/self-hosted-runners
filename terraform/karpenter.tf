@@ -17,8 +17,11 @@ module "karpenter" {
 
 # ── Karpenter Helm release ─────────────────────────────────────────────────────
 resource "helm_release" "karpenter" {
-  namespace        = "karpenter"
-  create_namespace = true
+  # Deploy to kube-system so the namespace matches the Pod Identity Association
+  # that the karpenter module creates (namespace defaults to "kube-system").
+  # Changing this after initial apply requires a Helm uninstall + reinstall.
+  namespace        = "kube-system"
+  create_namespace = false
   name             = "karpenter"
   repository       = "oci://public.ecr.aws/karpenter"
   chart            = "karpenter"

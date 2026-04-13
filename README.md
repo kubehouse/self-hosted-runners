@@ -1,48 +1,116 @@
 # GitHub Self-Hosted Runners on EKS
 
-Self-hosted GitHub Actions runners for the **kubehouse** organisation, running on AWS EKS with Karpenter autoscaling. Nodes spin up on demand when a job is queued and terminate when idle — you pay only for active CI time.
+Ephemeral, auto-scaling GitHub Actions runners for the **kubehouse** organisation, running on Amazon EKS with Karpenter. Nodes spin up on demand when a job is queued and are terminated within 30 seconds of going idle — you pay only for active CI time.
 
-## Architecture
+---
+
+## Why This Matters
+
+### Cost efficiency
+
+GitHub-hosted runners are convenient but expensive at scale. An `ubuntu-latest` runner costs roughly $0.008 per minute. A team running 500 CI minutes per day spends ~$1,200/month on runner compute alone — before any data transfer or storage.
+
+This platform replaces those runners with EC2 **Spot instances** (up to 90 % cheaper than On-Demand) that exist only for the duration of each job. The system nodes that run the controllers are always-on, but they are tiny (`t3.medium`) and represent a negligible fraction of the total cost.
+
+### Scale to zero
+
+`minRunners = 0` means no runner pods — and no EC2 nodes — are running when there are no queued jobs. There is no "warm pool" to pay for overnight or at weekends.
+
+### Ephemeral by design
+
+Each runner pod handles exactly one job and is then destroyed. There is no state carried between jobs, no leftover files from a previous build, and no way for a compromised job to poison the runner environment for the next one. This matches — and improves on — the security model of GitHub-hosted runners.
+
+### Scalability
+
+Karpenter launches new EC2 nodes in 60–90 seconds (vs 3–5 minutes for an EC2 Auto Scaling group). ARC can scale a runner set from 0 to `maxRunners` pods in a single reconciliation loop. The platform can handle sudden bursts without pre-provisioning capacity.
+
+---
+
+## How It Works
 
 ```
-GitHub Actions job queued
-        │
-        ▼
-  ARC Scale Set Controller  (arc-systems namespace, system node group)
-        │  watches job queue via GitHub API
-        ▼
-  AutoscalingRunnerSet  ──► creates runner Pod
-        │
-        ▼
-  Karpenter  (karpenter namespace, system node group)
-        │  sees unschedulable Pod → provisions EC2 node
-        ▼
-  EC2 Node  (Karpenter-managed, terminates when idle)
-        │
-        ▼
-  Runner Pod executes job steps
+GitHub workflow queued (runs-on: linux-k8s)
+          │
+          ▼
+ARC Scale Set Controller  ──  polls GitHub Actions API
+          │                   detects pending job
+          ▼
+Runner Pod created in arc-runners namespace
+          │
+          ▼  (Pod is Unschedulable — no matching node)
+Karpenter Controller
+          │  evaluates NodePool constraints
+          │  selects cheapest available Spot instance
+          │  calls EC2 CreateFleet
+          ▼
+EC2 node boots with Amazon Linux 2023 (~90 s)
+          │
+          ▼
+Runner Pod scheduled → job executes
+          │
+          ▼
+Job completes → Pod exits → node idle → Karpenter terminates (~30 s)
 ```
 
-**Namespaces**
+**Runner pod topology (Docker-in-Docker):**
 
-| Namespace | Contents |
-|---|---|
-| `karpenter` | Karpenter controller |
-| `arc-systems` | ARC scale set controller |
-| `arc-runners` | Runner pods + GitHub PAT secret |
+```
+init-dind-externals  ──  copies runner binaries to shared volume
+runner               ──  executes workflow steps, uses dind socket
+dind                 ──  privileged Docker daemon on /var/run/docker.sock
+```
 
-**Workflows use**
+This gives workflows full Docker support (build, run, compose) identical to GitHub-hosted `ubuntu-latest`.
 
-| `runs-on` label | OS | Node type |
-|---|---|---|
-| `linux-k8s` | Amazon Linux 2023 | Spot → On-Demand fallback |
-| `windows-k8s` | Windows Server 2022 | On-Demand → Spot fallback |
+For a deeper breakdown including network, IAM, and trade-off analysis, see [Architecture.md](Architecture.md).
+
+---
+
+## Repository Structure
+
+```
+.
+├── .github/
+│   └── workflows/
+│       ├── ci.yaml          # PR checks: fmt, validate, lint, Checkov, Gitleaks, plan, Infracost
+│       └── release.yaml     # Merge to main: plan → approval gate → apply
+├── docker/
+│   ├── linux/Dockerfile     # Custom Linux DinD runner image (optional)
+│   └── windows/Dockerfile   # Custom Windows runner image (build required)
+├── karpenter/
+│   ├── ec2nodeclass-linux.yaml.tpl    # AL2023 node class template
+│   ├── ec2nodeclass-windows.yaml.tpl  # Windows Server 2022 node class template
+│   ├── nodepool-linux.yaml            # Spot/On-Demand Linux runner node pool
+│   └── nodepool-windows.yaml          # On-Demand Windows runner node pool
+├── terraform/
+│   ├── tests/
+│   │   └── main.tftest.hcl  # Terraform native tests (mock providers)
+│   ├── arc.tf               # ARC controller + Linux/Windows runner scale sets
+│   ├── backend.hcl.example  # Template for local backend config (gitignored)
+│   ├── backend.tf           # Partial S3 backend declaration
+│   ├── data.tf              # Data sources (AZs)
+│   ├── eks.tf               # EKS cluster + system node group + add-ons
+│   ├── iam.tf               # GitHub OIDC provider + CI/CD role
+│   ├── karpenter.tf         # Karpenter Helm release + CRD manifests
+│   ├── locals.tf            # Shared local values (name, region, tags)
+│   ├── outputs.tf           # Cluster endpoint, kubectl command, role ARNs
+│   ├── providers.tf         # AWS, Kubernetes, Helm, kubectl provider config
+│   ├── terraform.tfvars     # All variable values (non-sensitive defaults)
+│   ├── variables.tf         # Variable declarations with descriptions
+│   ├── versions.tf          # Provider version constraints + lock file
+│   └── vpc.tf               # VPC, subnets, NAT gateway
+├── .gitignore
+├── .pre-commit-config.yaml  # Local git hooks: fmt, tflint, checkov, gitleaks
+├── .tflint.hcl              # TFLint rules: AWS ruleset, naming, documentation
+├── Architecture.md          # ASCII diagrams + trade-off analysis
+├── CODEOWNERS               # @francescowang owns all files
+├── destroy.sh               # Ordered teardown script
+└── Makefile                 # Developer workflow: init, plan, apply, lint, test, debug
+```
 
 ---
 
 ## Prerequisites
-
-Install these tools before you start:
 
 | Tool | Minimum version | Install |
 |---|---|---|
@@ -50,201 +118,250 @@ Install these tools before you start:
 | [Terraform](https://developer.hashicorp.com/terraform/downloads) | 1.14.8 | `brew install terraform` |
 | [kubectl](https://kubernetes.io/docs/tasks/tools/) | 1.29 | `brew install kubectl` |
 | [Helm](https://helm.sh/docs/intro/install/) | v3 | `brew install helm` |
+| [TFLint](https://github.com/terraform-linters/tflint#installation) | latest | `brew install tflint` |
+| [Checkov](https://www.checkov.io/2.Basics/Installing%20Checkov.html) | latest | `pip install checkov` |
 
-Your AWS IAM identity needs permissions for: EKS, EC2, VPC, IAM, SQS, EventBridge, and ECR Public. Attaching `AdministratorAccess` is fine for a POC — tighten it up before production.
+Your AWS identity needs: EKS, EC2, VPC, IAM, SQS, EventBridge, S3, and ECR Public. For a POC, `AdministratorAccess` is fine — tighten it before production.
 
 ---
 
-## Quick Start
+## Step-by-Step Deployment
 
 ### 1. Configure AWS credentials
 
 ```bash
 aws configure
-# or, if using SSO:
+# or, for SSO:
 aws sso login --profile your-profile
-```
 
-Verify:
-
-```bash
+# Verify:
 aws sts get-caller-identity
 ```
 
 ### 2. Create a GitHub Personal Access Token
 
-1. Go to **github.com → Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token**
+1. Go to **GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token**
 2. Set **Resource owner** to `kubehouse`
-3. Set expiry (90 days is reasonable for a POC)
-4. Under **Permissions → Organization permissions**, grant:
-   - **Self-hosted runners** → Read and write
-5. Copy the token — you will need it in the next step
+3. Set an expiry (90 days is reasonable for a POC)
+4. Under **Permissions → Organisation permissions**, grant:
+   - **Self-hosted runners → Read and write**
+5. Copy the token — you will need it in step 4
 
-> **Classic token alternative**: create a classic PAT with the `admin:org` scope if fine-grained tokens are not available on your plan.
+> **Classic token alternative**: create a classic PAT with the `admin:org` scope if fine-grained tokens are unavailable on your plan.
 
-### 3. Clone this repo and initialise Terraform
-
-```bash
-git clone https://github.com/kubehouse/<this-repo>.git
-cd <this-repo>/terraform
-
-terraform init
-```
-
-### 4. Deploy
+### 3. Clone and initialise
 
 ```bash
-terraform apply \
-  -var="github_pat=ghp_YOUR_TOKEN_HERE"
+git clone https://github.com/kubehouse/self-hosted-runners.git
+cd self-hosted-runners
+
+# Copy the backend config template and fill in your values
+cp terraform/backend.hcl.example terraform/backend.hcl
+# (terraform/backend.hcl is gitignored — never commit it)
+
+# Create the S3 state bucket (once, ever)
+make bootstrap
+
+# Initialise Terraform with the S3 backend
+make init
 ```
 
-`github_config_url` defaults to `https://github.com/kubehouse` so you only need to supply the PAT.
+### 4. Review and apply
 
-Terraform will:
-- Create a VPC in `eu-west-2`
-- Provision an EKS 1.35 cluster with a 2-node system node group
-- Install Karpenter via Helm
-- Install the ARC controller and two runner scale sets
-- Register both scale sets with your GitHub org
+```bash
+export GITHUB_PAT=ghp_your_token_here
+
+make plan    # review what will be created
+make apply   # provision everything
+```
+
+Terraform provisions, in order:
+1. VPC with private/public subnets across 3 AZs
+2. EKS cluster (control plane + system node group)
+3. EKS add-ons: CoreDNS, kube-proxy, vpc-cni, eks-pod-identity-agent
+4. Karpenter (Helm release + IAM + interruption queue + NodePool CRDs)
+5. ARC controller (Helm release)
+6. Linux runner scale set (Helm release, registered with GitHub)
+7. GitHub OIDC provider + CI/CD IAM role (skipped if `use_existing_oidc_role_arn` is set)
 
 This takes approximately **15–20 minutes** on the first run.
 
 ### 5. Configure kubectl
 
 ```bash
-$(terraform output -raw configure_kubectl)
-```
-
-Or manually:
-
-```bash
+make kubeconfig
+# equivalent to:
 aws eks update-kubeconfig --region eu-west-2 --name github-runners
 ```
 
-### 6. Verify runners are registered
+### 6. Verify
 
 ```bash
-# Check ARC controller is running
+# Check system pods are running
+kubectl get pods -n karpenter
 kubectl get pods -n arc-systems
 
-# Check runner scale sets
+# Check runner scale sets registered (should show 0 runners — scale to zero)
 kubectl get autoscalingrunnerset -n arc-runners
 
-# Check no pods are running yet (scale-to-zero when idle)
-kubectl get pods -n arc-runners
+# Equivalent Makefile shortcut:
+make status
 ```
 
-Then in GitHub: **github.com/organisations/kubehouse/settings/actions/runners**
+In GitHub, go to **github.com/organisations/kubehouse/settings/actions/runners** — you should see `linux-k8s` registered as an Idle runner group.
 
-You should see two runner groups — `linux-k8s` and `windows-k8s` — with a status of **Idle**.
+### 7. Configure GitHub repository secrets and variables
+
+In the repository **Settings → Secrets and variables → Actions**:
+
+| Type | Name | Value |
+|---|---|---|
+| Secret | `RUNNER_GITHUB_PAT` | Your GitHub PAT |
+| Secret | `INFRACOST_API_KEY` | From [infracost.io](https://www.infracost.io/) (free tier available) |
+| Variable | `TF_DIR` | `terraform` |
+| Variable | `TF_VERSION` | `1.14.8` |
+| Variable | `AWS_REGION` | `eu-west-2` |
+| Variable | `STATE_BUCKET` | `kubehouse-terraform-state` |
+| Variable | `STATE_KEY` | `self-hosted-runners/terraform/terraform.tfstate` |
+| Variable | `AWS_CICD_ROLE_ARN` | Value of `terraform output github_actions_cicd_role_arn` |
+
+Also create a **`production` environment** (Settings → Environments → New environment → `production`) and add yourself as a Required reviewer. This gates `terraform apply` behind manual approval on every merge to main.
 
 ---
 
-## Using runners in your workflows
+## Using the Runners in Workflows
 
-Replace `ubuntu-latest` or `windows-latest` in any workflow:
+Replace `ubuntu-latest` with `linux-k8s` in any workflow:
 
 ```yaml
 jobs:
   build:
-    runs-on: linux-k8s       # ← was ubuntu-latest
-
-  build-windows:
-    runs-on: windows-k8s     # ← was windows-latest
-```
-
-### Minimal example
-
-```yaml
-name: Hello from self-hosted runner
-
-on: [push]
-
-jobs:
-  hello:
-    runs-on: linux-k8s
+    runs-on: linux-k8s   # was: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - run: echo "Running on $RUNNER_NAME ($RUNNER_OS)"
+      - run: docker build -t myapp .  # Docker works via DinD sidecar
 ```
 
-### CI workflow
-
-See [`.github/workflows/ci.yaml`](.github/workflows/ci.yaml) — runs on every push and pull request. Includes Node.js install, lint, test, and build steps on both Linux and Windows runners.
-
-### Release workflow
-
-See [`.github/workflows/release.yaml`](.github/workflows/release.yaml) — triggered by a version tag.
-
-```bash
-git tag v1.0.0
-git push origin v1.0.0
-```
-
-This builds a release artefact, runs tests, and publishes a GitHub Release with auto-generated release notes.
-
----
-
-## Windows runners
-
-> **Important**: GitHub does not publish an official Windows ARC runner image.
-
-Before `windows-k8s` jobs will work you need to:
-
-1. Build a Windows container image from the [actions/runner Dockerfiles](https://github.com/actions/runner/tree/main/images)
-2. Push it to a registry Kubernetes can pull from (e.g. ECR, GHCR, Docker Hub)
-3. Set the image in Terraform:
-
-```bash
-terraform apply \
-  -var="github_pat=ghp_YOUR_TOKEN" \
-  -var="windows_runner_image=ghcr.io/kubehouse/windows-runner:ltsc2022"
-```
-
-Until then, comment out the `test-windows` job in `ci.yaml` to avoid failed runs.
+The first job after a period of inactivity will take ~90 seconds longer than usual (EC2 cold start). Subsequent jobs within the same burst are faster because Karpenter keeps the node running until it becomes idle.
 
 ---
 
 ## Scaling
 
-Runner counts are controlled by two Terraform variables. Karpenter automatically provisions the right number of EC2 nodes to match.
-
 | Variable | Default | Description |
 |---|---|---|
-| `linux_runner_min_count` | `0` | Minimum idle Linux runners (0 = scale to zero) |
-| `linux_runner_max_count` | `20` | Maximum concurrent Linux runners |
-| `windows_runner_min_count` | `0` | Minimum idle Windows runners |
-| `windows_runner_max_count` | `10` | Maximum concurrent Windows runners |
+| `linux_runner_min_count` | `0` | Idle runners kept alive (0 = scale to zero) |
+| `linux_runner_max_count` | `5` | Maximum concurrent runners (cap for cost control) |
+| `windows_runner_max_count` | `0` | Set > 0 to enable Windows runners |
 
-To increase the Linux cap to 50:
+To raise the Linux cap to 20:
 
 ```bash
-terraform apply \
-  -var="github_pat=ghp_YOUR_TOKEN" \
-  -var="linux_runner_max_count=50"
+# Edit terraform/terraform.tfvars:
+linux_runner_max_count = 20
+
+export GITHUB_PAT=ghp_...
+make plan && make apply
+```
+
+The Karpenter NodePool `limits` in `karpenter/nodepool-linux.yaml` acts as a hard ceiling on total vCPU and memory regardless of `maxRunners`. Adjust both together when scaling up significantly.
+
+---
+
+## Local Development
+
+```bash
+make fmt          # auto-format all Terraform files
+make fmt-check    # check formatting (what CI runs)
+make validate     # terraform validate (no backend needed)
+make lint         # TFLint with AWS ruleset
+make security     # Checkov scan
+make test         # Terraform native tests (mock providers — no AWS creds needed)
+make ci           # run all of the above in sequence
+
+make status       # show ARC pods, runner sets, and Karpenter nodes
+make runners      # watch runner scale sets live (Ctrl-C to stop)
+make logs-arc     # tail ARC controller logs
+make logs-karpenter  # tail Karpenter controller logs
+```
+
+Install pre-commit hooks to catch issues before they reach CI:
+
+```bash
+pip install pre-commit
+pre-commit install
+pre-commit run --all-files  # run manually across the whole repo
 ```
 
 ---
 
-## Destroying all resources
+## Destroying All Resources
 
-Run the included script from the repo root. It handles teardown in the correct order so AWS does not block on dangling ENIs or load balancers.
+Run the included script from the repository root. It handles teardown in the correct order so AWS does not block on dangling ENIs or load balancers.
 
 ```bash
 ./destroy.sh
 ```
 
-**What it does, in order:**
+The script: deletes Karpenter NodePools (terminates runner nodes) → waits for nodes to drain → deletes EC2NodeClasses → uninstalls Helm releases → runs `terraform destroy`. You will be asked to type `destroy` to confirm.
 
-1. Reads cluster name and region from Terraform state
-2. Deletes Karpenter `NodePool` objects — Karpenter drains and terminates all runner EC2 nodes
-3. Waits until every Karpenter-managed node is gone from Kubernetes
-4. Deletes `EC2NodeClass` objects
-5. Uninstalls Helm releases: runner scale sets → ARC controller → Karpenter
-6. Runs `terraform destroy -auto-approve`
-7. Scans for and removes any orphaned EC2 instances or load balancers
+---
 
-You will be asked to type `destroy` to confirm before anything is deleted.
+## Things to Keep in Mind
+
+### EC2 Spot availability
+
+Spot capacity is not guaranteed. If all configured instance types are unavailable simultaneously, Karpenter falls back to On-Demand. Broaden the instance type list in `karpenter/nodepool-linux.yaml` to improve Spot availability — the more diverse the list, the better the chances of finding cheap capacity.
+
+### GitHub API rate limits
+
+ARC polls the GitHub Actions API continuously. The polling interval is managed by ARC internally, but if you run many scale sets across many organisations, ensure you are not exhausting the 5,000 requests/hour rate limit for the PAT used. A GitHub App (higher rate limits, no expiry) is the recommended production alternative to PATs.
+
+### IAM bootstrap chicken-and-egg
+
+The GitHub OIDC IAM role is created by Terraform. On the very first apply, you must run locally with your own AWS credentials. After that, the CI/CD pipeline can assume the role created here. If you use an existing role (`use_existing_oidc_role_arn`), this is not a concern.
+
+### EKS add-on conflicts (OVERWRITE)
+
+All EKS add-ons are configured with `resolve_conflicts_on_create = "OVERWRITE"`. This is intentional — without it, a partial apply leaves add-ons in a `DEGRADED` state that blocks subsequent applies. It is safe for a fresh cluster; on an existing cluster, verify there are no custom add-on configurations before applying.
+
+### State lock and concurrent applies
+
+The backend uses S3 native state locking (`use_lockfile = true`, Terraform ≥ 1.10). If `terraform apply` is interrupted, the lock file remains. Release it with:
+
+```bash
+make unlock LOCK_ID=<lock-id-from-error-message>
+```
+
+### Service quota limits
+
+Before scaling past ~20 concurrent runners, check your EC2 service quotas in `eu-west-2`:
+- **Running On-Demand Standard instances** — default 32 vCPU
+- **Running Spot Instance Requests** — default 32 vCPU (separate quota per instance family)
+
+Request a quota increase via the AWS Service Quotas console before you hit the limit in production.
+
+### Windows runner images
+
+GitHub does not publish an official Windows ARC runner image. Before enabling Windows runners, build a custom image:
+
+```bash
+make docker-windows
+docker tag github-runner-windows:latest <your-registry>/windows-runner:ltsc2022
+docker push <your-registry>/windows-runner:ltsc2022
+
+# Then update terraform.tfvars:
+windows_runner_image     = "<your-registry>/windows-runner:ltsc2022"
+windows_runner_max_count = 2
+```
+
+### Single NAT gateway
+
+`single_nat_gateway = true` reduces NAT costs during a POC. For production, set it to `false` — a single NAT gateway is a regional availability risk. The extra ~$32/month per AZ is worthwhile for workloads that require high availability.
+
+### Karpenter consolidation and disruption budgets
+
+The NodePool `consolidateAfter: 30s` is aggressive. If your jobs take a long time to start but create bursts of short jobs, Karpenter may consolidate nodes between bursts and cause unnecessary cold starts. Tune this value to match your workload's inter-job gap.
 
 ---
 
@@ -262,25 +379,47 @@ kubectl logs -n arc-systems -l app.kubernetes.io/name=gha-runner-scale-set-contr
 ```bash
 kubectl logs -n karpenter -l app.kubernetes.io/name=karpenter | grep -i error
 kubectl describe nodepool linux-runners
+# Look for: capacity unavailable, IAM permission denied, subnet not found
 ```
 
-**Node stuck in Pending**
+**Pod stuck in Pending**
 
 ```bash
-kubectl describe pod <runner-pod> -n arc-runners
-# Look for "no matching NodePool" or EC2 capacity errors
+kubectl describe pod <runner-pod-name> -n arc-runners
+# Look for: "no matching NodePool", "0/1 nodes available", EC2 capacity errors
 ```
 
 **terraform destroy fails with dependency error**
 
-This usually means a Karpenter node is still running with an ENI in a subnet Terraform is trying to delete. Run:
+Karpenter-managed nodes may hold ENIs in subnets Terraform is trying to delete. Find and terminate them:
 
 ```bash
 aws ec2 describe-instances \
   --region eu-west-2 \
-  --filters "Name=tag:Cluster,Values=github-runners" "Name=instance-state-name,Values=running" \
+  --filters \
+    "Name=tag:Cluster,Values=github-runners" \
+    "Name=instance-state-name,Values=running" \
   --query "Reservations[].Instances[].InstanceId" \
   --output text
 ```
 
-Then terminate those instances and re-run `terraform destroy`.
+Terminate the listed instances, then re-run `terraform destroy` or `./destroy.sh`.
+
+**Stale Terraform state lock**
+
+```bash
+make unlock LOCK_ID=<id-from-error-output>
+```
+
+---
+
+## References
+
+- [Actions Runner Controller — official docs](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners-with-actions-runner-controller/about-actions-runner-controller)
+- [Karpenter — getting started with EKS](https://karpenter.sh/docs/getting-started/getting-started-with-karpenter/)
+- [Karpenter EC2NodeClass API reference](https://karpenter.sh/docs/concepts/nodeclasses/)
+- [terraform-aws-eks module](https://github.com/terraform-aws-modules/terraform-aws-eks)
+- [GitHub OIDC — configuring AWS](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services)
+- [EC2 Spot best practices](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/spot-best-practices.html)
+- [Infracost — CI/CD integration](https://www.infracost.io/docs/integrations/github_actions/)
+- [EKS Kubernetes version support calendar](https://docs.aws.amazon.com/eks/latest/userguide/kubernetes-versions.html)

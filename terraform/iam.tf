@@ -9,6 +9,11 @@
 # After that, the CI/CD pipeline uses the role created here.
 
 resource "aws_iam_openid_connect_provider" "github" {
+  # Skip creation when an existing OIDC role (and therefore an existing provider)
+  # is supplied. AWS allows only ONE OIDC provider per URL per account — attempting
+  # to create a second one with the same URL returns EntityAlreadyExists.
+  count = var.use_existing_oidc_role_arn == null ? 1 : 0
+
   url = "https://token.actions.githubusercontent.com"
 
   client_id_list = ["sts.amazonaws.com"]
@@ -27,14 +32,19 @@ resource "aws_iam_openid_connect_provider" "github" {
 # Restricts which GitHub org/repos can assume this role.
 # Change the StringLike condition to a specific repo for tighter control:
 #   "repo:${var.github_org}/self-hosted-runners:ref:refs/heads/main"
+#
+# Guarded by the same count as the OIDC provider and the role below — when
+# use_existing_oidc_role_arn is set, none of these three resources are created.
 data "aws_iam_policy_document" "github_actions_assume_role" {
+  count = var.use_existing_oidc_role_arn == null ? 1 : 0
+
   statement {
     sid     = "AllowGitHubOIDC"
     actions = ["sts:AssumeRoleWithWebIdentity"]
 
     principals {
       type        = "Federated"
-      identifiers = [aws_iam_openid_connect_provider.github.arn]
+      identifiers = [aws_iam_openid_connect_provider.github[0].arn]
     }
 
     condition {
@@ -59,7 +69,7 @@ resource "aws_iam_role" "github_actions_cicd" {
 
   name               = "${local.name}-github-actions-cicd"
   description        = "Assumed by GitHub Actions via OIDC to provision EKS runner infrastructure"
-  assume_role_policy = data.aws_iam_policy_document.github_actions_assume_role.json
+  assume_role_policy = data.aws_iam_policy_document.github_actions_assume_role[0].json
 
   # Prevent accidental deletion via console
   lifecycle {

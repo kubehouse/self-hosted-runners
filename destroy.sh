@@ -36,7 +36,7 @@ done
 echo -e "\n${RED}"
 echo "  ┌────────────────────────────────────────────────────────────┐"
 echo "  │  WARNING: PERMANENT DESTRUCTION                            │"
-echo "  │  Deletes the EKS cluster, VPC, all Karpenter EC2 nodes,   │"
+echo "  │  Deletes the EKS cluster, VPC, all Karpenter EC2 nodes,    │"
 echo "  │  and every Terraform-managed resource. Cannot be undone.   │"
 echo "  └────────────────────────────────────────────────────────────┘"
 echo -e "${NC}"

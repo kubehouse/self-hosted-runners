@@ -1,8 +1,8 @@
 name: Terraform CI
 
 # Runs on every PR targeting main, and on direct pushes to main.
-# Validates formatting, correctness, linting, and security of all Terraform code
-# before it can be merged or applied.
+# Validates formatting, correctness, linting, security, cost estimates, and
+# produces a Terraform plan before any merge or apply can occur.
 
 on:
   pull_request:
@@ -25,12 +25,31 @@ concurrency:
 
 permissions:
   contents: read
-  actions: read  # allow upload-sarif to inspect the workflow run for telemetry
-  pull-requests: write  # post lint/plan summaries as PR comments
-  security-events: write  # upload SARIF findings to GitHub Security tab
+  actions: read
+  id-token: write     # required for OIDC → AWS AssumeRoleWithWebIdentity (plan + infracost)
+  pull-requests: write # post lint/plan/cost summaries as PR comments
+  security-events: write # upload SARIF findings to GitHub Security tab
 
 jobs:
-  # ── 1. Format ────────────────────────────────────────────────────────────────
+  # ── 1. Secret scanning ───────────────────────────────────────────────────────
+  # Gitleaks runs first — it is fast and cheap. If a secret is found, there is
+  # no point running the rest of CI against code that must be rejected anyway.
+  secrets:
+    name: Secret scan (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # full history is required for accurate diff scanning
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Set GITLEAKS_LICENSE if using Gitleaks Pro (optional).
+          # GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+  # ── 2. Format ────────────────────────────────────────────────────────────────
   fmt:
     name: Format check
     runs-on: ubuntu-latest
@@ -55,14 +74,14 @@ jobs:
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: '## ❌ `terraform fmt` failed\n\nRun `make fmt` locally and commit the result.'
+              body: '## `terraform fmt` failed\n\nRun `make fmt` locally and commit the result.'
             });
 
       - name: Fail if fmt found issues
         if: steps.fmt.outcome == 'failure'
         run: exit 1
 
-  # ── 2. Validate ──────────────────────────────────────────────────────────────
+  # ── 3. Validate ──────────────────────────────────────────────────────────────
   validate:
     name: Validate
     runs-on: ubuntu-latest
@@ -83,7 +102,7 @@ jobs:
       - name: terraform validate
         run: terraform -chdir=${{ vars.TF_DIR }} validate -no-color
 
-  # ── 3. Lint ───────────────────────────────────────────────────────────────────
+  # ── 4. Lint ───────────────────────────────────────────────────────────────────
   lint:
     name: TFLint
     runs-on: ubuntu-latest
@@ -104,7 +123,7 @@ jobs:
         run: tflint --recursive --format compact
         working-directory: ${{ vars.TF_DIR }}
 
-  # ── 4. Security scan ──────────────────────────────────────────────────────────
+  # ── 5. Security scan ──────────────────────────────────────────────────────────
   security:
     name: Security scan (Checkov)
     runs-on: ubuntu-latest
@@ -135,18 +154,159 @@ jobs:
           sarif_file: results.sarif
           category: checkov
 
-  # ── 5. Summary gate ───────────────────────────────────────────────────────────
-  # A single job that all checks roll up into. Configure branch protection to
-  # require only this job — avoids updating rules when new checks are added.
+  # ── 6. Terraform plan ────────────────────────────────────────────────────────
+  # Runs a real plan against the S3 backend using OIDC credentials.
+  # Skipped for PRs from forks (forks cannot access OIDC or org secrets).
+  plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    # Only run on PRs from the same repository, or on pushes to main.
+    # Fork PRs are excluded because they cannot access OIDC or org secrets.
+    if: |
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # Authenticate with AWS via OIDC — no static credentials stored in GitHub.
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_CICD_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ vars.TF_VERSION }}
+
+      - name: Terraform Init
+        run: |
+          terraform -chdir=${{ vars.TF_DIR }} init \
+            -backend-config="bucket=${{ vars.STATE_BUCKET }}" \
+            -backend-config="key=${{ vars.STATE_KEY }}" \
+            -backend-config="region=${{ vars.AWS_REGION }}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true" \
+            -input=false
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          set +e
+          terraform -chdir=${{ vars.TF_DIR }} plan \
+            -lock-timeout=5m \
+            -var="github_pat=${{ secrets.RUNNER_GITHUB_PAT }}" \
+            -detailed-exitcode \
+            -no-color \
+            2>&1 | tee /tmp/plan.txt
+          echo "exitcode=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+          set -e
+
+      - name: Fail if plan errored (exit code 1)
+        if: steps.plan.outputs.exitcode == '1'
+        run: |
+          echo "terraform plan returned exit code 1 (error) — see logs above"
+          exit 1
+
+      - name: Post plan summary to PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          PLAN: ${{ steps.plan.outputs.exitcode }}
+        with:
+          script: |
+            const fs = require('fs');
+            const planTxt = fs.readFileSync('/tmp/plan.txt', 'utf8');
+            const truncated = planTxt.length > 60000
+              ? planTxt.slice(0, 60000) + '\n\n... (truncated — see job logs for full output)'
+              : planTxt;
+            const icon = process.env.PLAN === '0' ? '✅ No changes' : '🟡 Changes pending';
+            const body = `## ${icon}\n\n<details><summary>Show plan</summary>\n\n\`\`\`hcl\n${truncated}\n\`\`\`\n</details>`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+
+  # ── 7. Cost estimate (Infracost) ──────────────────────────────────────────────
+  # Posts a monthly cost delta to the PR so engineers can see the financial
+  # impact of infrastructure changes before they are merged.
+  #
+  # Requires:
+  #   Repository secret: INFRACOST_API_KEY  (from infracost.io)
+  #   The same OIDC credentials as the plan job (to resolve resource pricing).
+  infracost:
+    name: Cost estimate (Infracost)
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # Infracost needs the base branch to calculate the cost delta.
+      - name: Checkout base branch
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          path: base
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_CICD_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Setup Infracost
+        uses: infracost/actions/setup@v3
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+
+      # Generate cost estimate for the base (target) branch.
+      - name: Infracost — base branch
+        run: |
+          infracost breakdown \
+            --path base/${{ vars.TF_DIR }} \
+            --terraform-var "github_pat=PLACEHOLDER" \
+            --terraform-var-file base/${{ vars.TF_DIR }}/terraform.tfvars \
+            --format json \
+            --out-file /tmp/infracost-base.json
+
+      # Generate cost estimate for the PR (head) branch.
+      - name: Infracost — PR branch
+        run: |
+          infracost breakdown \
+            --path ${{ vars.TF_DIR }} \
+            --terraform-var "github_pat=PLACEHOLDER" \
+            --terraform-var-file ${{ vars.TF_DIR }}/terraform.tfvars \
+            --format json \
+            --out-file /tmp/infracost-pr.json
+
+      # Post a diff comment showing what the PR adds or removes in monthly cost.
+      - name: Post Infracost diff comment
+        uses: infracost/actions/comment@v1
+        with:
+          path: /tmp/infracost-pr.json
+          compare-to: /tmp/infracost-base.json
+          behavior: update  # update the existing comment rather than adding a new one
+
+  # ── 8. Summary gate ───────────────────────────────────────────────────────────
+  # Branch protection should require only this job. Adding new checks above
+  # automatically rolls them up here without touching branch protection rules.
   ci-pass:
     name: CI passed
     runs-on: ubuntu-latest
-    needs: [fmt, validate, lint, security]
+    needs: [secrets, fmt, validate, lint, security, plan, infracost]
     if: always()
     steps:
       - name: All checks passed
         run: |
-          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]]; then
+          results='${{ toJSON(needs.*.result) }}'
+          echo "Job results: $results"
+          if echo "$results" | grep -q '"failure"'; then
             echo "One or more CI checks failed."
             exit 1
           fi

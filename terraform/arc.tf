@@ -76,6 +76,20 @@ resource "helm_release" "arc_runner_linux" {
       minRunners         = var.linux_runner_min_count
       maxRunners         = var.linux_runner_max_count
 
+      # The listener pod watches the GitHub job queue and creates runner pods.
+      # It is a long-lived control-plane pod and must run on the system node group,
+      # not on an ephemeral runner node — so it needs the CriticalAddonsOnly toleration.
+      listenerTemplate = {
+        spec = {
+          nodeSelector = { role = "system" }
+          tolerations  = [{ key = "CriticalAddonsOnly", operator = "Exists" }]
+          # containers is required by the AutoscalingRunnerSet CRD; name must
+          # match the listener container that ARC injects. No other fields are
+          # overridden — the chart supplies the image and command.
+          containers = [{ name = "listener" }]
+        }
+      }
+
       template = {
         spec = {
           nodeSelector = {

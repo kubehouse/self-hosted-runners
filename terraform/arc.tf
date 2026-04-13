@@ -127,6 +127,20 @@ resource "helm_release" "arc_runner_linux" {
                 # Point the Docker CLI at the dind daemon socket
                 { name = "DOCKER_HOST", value = "unix:///var/run/docker.sock" }
               ]
+              # dind and runner start simultaneously; dockerd takes a few seconds
+              # to create the socket. Without this hook, concurrent runner pods
+              # (where the node is under more CPU pressure) hit the socket before
+              # dockerd has written it, producing:
+              #   failed to connect to the docker API at unix:///var/run/docker.sock
+              # The postStart hook blocks the runner from receiving its first job
+              # step until the socket file exists.
+              lifecycle = {
+                postStart = {
+                  exec = {
+                    command = ["/bin/sh", "-c", "until [ -S /var/run/docker.sock ]; do sleep 1; done"]
+                  }
+                }
+              }
               resources = {
                 requests = { cpu = "500m", memory = "512Mi" }
                 limits   = { cpu = "2", memory = "4Gi" }

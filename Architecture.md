@@ -4,6 +4,7 @@
 
 This platform provisions ephemeral, auto-scaling GitHub Actions runners on AWS using:
 
+```sh
 | Layer | Technology | Role |
 |---|---|---|
 | Container orchestration | Amazon EKS (Kubernetes 1.35) | Runs runner pods |
@@ -12,72 +13,73 @@ This platform provisions ephemeral, auto-scaling GitHub Actions runners on AWS u
 | Networking | AWS VPC (private subnets + NAT gateway) | Isolates workloads from the public internet |
 | State management | S3 + native S3 lockfile | Remote Terraform state with concurrent-write protection |
 | CI/CD | GitHub Actions + OIDC | Keyless AWS authentication for plan and apply |
+```
 
 ---
 
 ## System Diagram
 
-```
-┌───────────────────────────────────────────────────────────────────────────────┐
-│                               GitHub.com                                       │
+```sh
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                               GitHub.com                                        │
 │                                                                                 │
-│  ┌──────────────────┐    webhook / polling    ┌───────────────────────────┐   │
-│  │  Workflow YAML   │ ──────────────────────▶ │  GitHub Actions API       │   │
-│  │  runs-on:        │                          │  (job queue per label)    │   │
-│  │  linux-k8s       │                          └─────────────┬─────────────┘   │
+│  ┌──────────────────┐    webhook / polling     ┌───────────────────────────┐    │
+│  │  Workflow YAML   │ ──────────────────────▶  │  GitHub Actions API       │    │
+│  │  runs-on:        │                          │  (job queue per label)    │    │
+│  │  linux-k8s       │                          └─────────────┬─────────────┘    │
 │  └──────────────────┘                                        │                  │
 └──────────────────────────────────────────────────────────────│──────────────────┘
                                                                │ HTTPS long-poll
-                ┌──────────────────────────────────────────────▼──────────────────────┐
+                ┌──────────────────────────────────────────────▼────────────────────────┐
                 │                        AWS eu-west-2                                  │
-                │                                                                        │
+                │                                                                       │
                 │  ┌─────────────────────────────────────────────────────────────────┐  │
                 │  │                    VPC  10.0.0.0/16                             │  │
-                │  │                                                                  │  │
-                │  │  ┌─────────────────────────────────────────────────────────┐   │  │
+                │  │                                                                 │  │
+                │  │  ┌──────────────────────────────────────────────────────────┐   │  │
                 │  │  │              EKS Control Plane (AWS managed)             │   │  │
                 │  │  │  Kubernetes API server · etcd · scheduler · controllers  │   │  │
-                │  │  └──────────────────────────┬──────────────────────────────┘   │  │
-                │  │                              │                                   │  │
+                │  │  └───────────────────────────┬──────────────────────────────┘   │  │
+                │  │                              │                                  │  │
                 │  │           Private subnets (eu-west-2a/b/c)                      │  │
-                │  │                              │                                   │  │
-                │  │  ┌───────────────────────────┴─────────────────────────────┐   │  │
-                │  │  │           System Node Group  (t3.medium × 1-2)           │   │  │
-                │  │  │           On-Demand · taint: CriticalAddonsOnly          │   │  │
-                │  │  │                                                           │   │  │
-                │  │  │  ┌──────────────────┐   ┌──────────────────────────┐    │   │  │
-                │  │  │  │    Karpenter      │   │   ARC Scale Set           │    │   │  │
-                │  │  │  │    Controller     │   │   Controller              │    │   │  │
-                │  │  │  │  (karpenter ns)  │   │   (arc-systems ns)        │    │   │  │
-                │  │  │  └────────┬─────────┘   └────────────┬─────────────┘    │   │  │
-                │  │  └──────────│──────────────────────────│──────────────────┘   │  │
-                │  │             │ provision EC2              │ create runner pod    │  │
-                │  │             ▼                            ▼                     │  │
-                │  │  ┌──────────────────────────────────────────────────────────┐  │  │
-                │  │  │      Karpenter-managed Nodes  (EC2 Spot → On-Demand)     │  │  │
-                │  │  │      NodePool: linux-runners · taint: github-runner=linux│  │  │
-                │  │  │                                                            │  │  │
-                │  │  │  ┌──────────────────────────────────────────────────┐    │  │  │
-                │  │  │  │                  Runner Pod                       │    │  │  │
-                │  │  │  │                (arc-runners ns)                   │    │  │  │
-                │  │  │  │                                                   │    │  │  │
-                │  │  │  │  ┌─────────────────────┐  ┌──────────────────┐  │    │  │  │
-                │  │  │  │  │  init-dind-externals │  │      dind        │  │    │  │  │
-                │  │  │  │  │  (copies runner bins │  │  (privileged     │  │    │  │  │
-                │  │  │  │  │   to shared volume)  │  │   Docker daemon) │  │    │  │  │
-                │  │  │  │  └─────────────────────┘  └────────┬─────────┘  │    │  │  │
-                │  │  │  │                                     │ /var/run   │    │  │  │
-                │  │  │  │  ┌──────────────────────────────────▼─────────┐  │    │  │  │
-                │  │  │  │  │              runner container               │  │    │  │  │
-                │  │  │  │  │  executes workflow steps · DOCKER_HOST=     │  │    │  │  │
-                │  │  │  │  │  unix:///var/run/docker.sock                │  │    │  │  │
-                │  │  │  │  └─────────────────────────────────────────────┘  │    │  │  │
-                │  │  │  └──────────────────────────────────────────────────┘    │  │  │
-                │  │  │                                                            │  │  │
-                │  │  │  (node terminates within 30 s of becoming idle)           │  │  │
-                │  │  └──────────────────────────────────────────────────────────┘  │  │
-                │  └──────────────────────────────────────────────────────────────────┘  │
-                └──────────────────────────────────────────────────────────────────────────┘
+                │  │                              │                                  │  │
+                │  │  ┌───────────────────────────┴─────────────────────────────┐    │  │
+                │  │  │           System Node Group  (t3.medium × 1-2)          │    │  │
+                │  │  │           On-Demand · taint: CriticalAddonsOnly         │    │  │
+                │  │  │                                                         │    │  │
+                │  │  │  ┌──────────────────┐   ┌──────────────────────────┐    │    │  │
+                │  │  │  │    Karpenter     │   │   ARC Scale Set          │    │    │  │
+                │  │  │  │    Controller    │   │   Controller             │    │    │  │
+                │  │  │  │  (karpenter ns)  │   │   (arc-systems ns)       │    │    │  │
+                │  │  │  └────────┬─────────┘   └────────────┬─────────────┘    │    │  │
+                │  │  └───────────│──────────────────────────│──────────────────┘    │  │
+                │  │              │ provision EC2            │ create runner pod     │  │
+                │  │              ▼                          ▼                       │  │
+                │  │  ┌──────────────────────────────────────────────────────────┐   │  │
+                │  │  │      Karpenter-managed Nodes  (EC2 Spot → On-Demand)     │   │  │
+                │  │  │      NodePool: linux-runners · taint: github-runner=linux│   │  │
+                │  │  │                                                          │   │  │
+                │  │  │  ┌──────────────────────────────────────────────────┐    │   │  │
+                │  │  │  │                  Runner Pod                      │    │   │  │
+                │  │  │  │                (arc-runners ns)                  │    │   │  │
+                │  │  │  │                                                  │    │   │  │
+                │  │  │  │  ┌──────────────────────┐  ┌──────────────────┐  │    │   │  │
+                │  │  │  │  │  init-dind-externals │  │      dind        │  │    │   │  │
+                │  │  │  │  │  (copies runner bins │  │  (privileged     │  │    │   │  │
+                │  │  │  │  │   to shared volume)  │  │   Docker daemon) │  │    │   │  │
+                │  │  │  │  └──────────────────────┘  └────────┬─────────┘  │    │   │  │
+                │  │  │  │                                     │ /var/run   │    │   │  │
+                │  │  │  │  ┌──────────────────────────────────▼─────────┐  │    │   │  │
+                │  │  │  │  │              runner container              │  │    │   │  │
+                │  │  │  │  │  executes workflow steps · DOCKER_HOST=    │  │    │   │  │
+                │  │  │  │  │  unix:///var/run/docker.sock               │  │    │   │  │
+                │  │  │  │  └────────────────────────────────────────────┘  │    │   │  │
+                │  │  │  └──────────────────────────────────────────────────┘    │   │  │
+                │  │  │                                                          │   │  │
+                │  │  │  (node terminates within 30 s of becoming idle)          │   │  │
+                │  │  └──────────────────────────────────────────────────────────┘   │  │
+                │  └─────────────────────────────────────────────────────────────────┘  │
+                └───────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -86,7 +88,7 @@ This platform provisions ephemeral, auto-scaling GitHub Actions runners on AWS u
 
 Step-by-step sequence of events from workflow trigger to job completion:
 
-```
+```sh
  1  Developer pushes a commit or opens a PR
         │
         ▼
@@ -135,7 +137,7 @@ Step-by-step sequence of events from workflow trigger to job completion:
 
 ## Network Architecture
 
-```
+```sh
 VPC: 10.0.0.0/16
 │
 ├── Public subnets  (10.0.48.0/24, 10.0.49.0/24, 10.0.50.0/24)
@@ -155,7 +157,7 @@ Nodes and pods live entirely in **private subnets**. The EKS API server endpoint
 
 ## IAM Architecture (IRSA / Pod Identity)
 
-```
+```sh
 GitHub Actions workflow
         │ AssumeRoleWithWebIdentity
         ▼
@@ -185,7 +187,7 @@ Karpenter Controller (EKS Pod Identity — no annotation required)
 
 ## Kubernetes Namespaces
 
-```
+```sh
 kube-system (shared with system add-ons)
   └── karpenter (Deployment)         — watches for unschedulable pods,
                                         provisions/decommissions EC2 nodes
